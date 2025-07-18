@@ -2,7 +2,12 @@ from pathlib import Path
 import numpy as np
 import torch
 from torch.utils.data import Dataset
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D 
 
+
+
+#---------------------------------data preprocessing-----------------------------------
 
 def _read_split_list(list_path: Path) -> list[str]:
     """Return the file-stems (e.g. 'airplane_001') from a split list file (to seperate train, test)"""
@@ -62,12 +67,74 @@ class ModelNet40(Dataset):
 
         label = self.cls2idx[cls]
         return torch.from_numpy(pc), label
+    
+
+
+#--------------------------------- plotting -----------------------------------   
+
+def plot_point_cloud(
+        pc,
+        title: str | None = None,
+        elev: float = 30,
+        azim: float = 45,
+        s: float = 2,        
+        c: str | np.ndarray = "tab:blue",
+):
+        """
+        Visualise a single point cloud.
+
+        Parameters
+        ----------
+        pc : (N, 3) np.ndarray | torch.Tensor
+            xyz coordinates.
+        title : str | None
+            Optional plot title.
+        elev, azim : float
+            View angles (matplotlib convention).
+        figsize : tuple[int, int]
+            Size of the figure in inches.
+        s : float
+            Scatter marker size.
+        c : str | array-like
+            Marker colour(s). Can be a single colour or per-point array.
+        """
+        # Convert torch → numpy if needed
+        if "torch" in str(type(pc)):
+            pc = pc.detach().cpu().numpy()
+
+        assert pc.ndim == 2 and pc.shape[1] == 3, "input must be (N, 3)"
+
+        fig = plt.figure(figsize=(10,10))
+        ax = fig.add_subplot(111, projection="3d")
+        ax.scatter(pc[:, 0], pc[:, 1], pc[:, 2], s=s, c=c, depthshade=False)
+
+        ax.set_xlabel("X")
+        ax.set_ylabel("Y")
+        ax.set_zlabel("Z")
+        if title is not None:
+            ax.set_title(title)
+
+        ax.view_init(elev=elev, azim=azim) 
+        ax.grid(False)
+        plt.tight_layout()
+        plt.savefig(f'{title}.png')
+
+
+def visualize_classes(classes_to_viz: list):
+    for class_to_viz in classes_to_viz:
+        txt_path = f"modelnet40_normal_resampled/{class_to_viz}/{class_to_viz}_0001.txt"
+        pointcloud = _load_point_cloud(txt_path=txt_path, num_points=1024)
+        plot_point_cloud(pointcloud, title=class_to_viz, elev=20, azim=-60)
+
+
+visualize_classes(['bottle', 'chair', 'airplane', 'monitor'])
 
 
 # ------------------------------------------------------------------
 train_ds = ModelNet40(
     root_dir="modelnet40_normal_resampled",
-    split_txt="modelnet40_train.txt"
+    split_txt="modelnet40_train.txt",
+    num_points=256
 )
 test_ds  = ModelNet40(
     root_dir="modelnet40_normal_resampled",
@@ -83,4 +150,6 @@ print("Train Len: ", len(train_ds))
 
 print("Test Obj Shape: ", test_ds[0][0].shape)
 print("Test Len: ", len(test_ds))
+
+
 
