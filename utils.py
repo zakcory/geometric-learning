@@ -37,36 +37,29 @@ class ModelNet40(Dataset):
     ModelNet40 loader that follows the train/test split files.
     """
 
-    def __init__(
-        self,
-        root_dir,
-        split_txt,
-        num_points=256,
-        transform=None      
-    ):
-        
+    def __init__(self, root_dir, split_txt, num_points=256, transform=None):
         self.root = Path(root_dir)
-        self.names = _read_split_list(self.root.joinpath(Path(split_txt)))
+        self.names = _read_split_list(self.root / split_txt)   # stems
         self.num_points = num_points
         self.transform = transform
 
-        classes = sorted(d.name for d in self.root.iterdir() if d.is_dir())
-        self.cls2idx = {c: i for i, c in enumerate(classes)}
+        # ---------- build class ↔ index map from split files -----------
+        class_names = {stem.rsplit("_", 1)[0] for stem in self.names}
+        self.cls2idx = {c: i for i, c in enumerate(sorted(class_names))}
+
+    def __getitem__(self, idx):
+        stem = self.names[idx]                 # e.g. "flower_pot_0001"
+        cls  = stem.rsplit("_", 1)[0]          # → "flower_pot"
+        file = self.root / cls / f"{stem}.txt"
+
+        pc = _load_point_cloud(file, self.num_points)
+        if self.transform is not None:
+            pc = self.transform(pc)
+        label = self.cls2idx[cls]              # guaranteed 0 … 39
+        return torch.from_numpy(pc), label
 
     def __len__(self) -> int:
         return len(self.names)
-
-    def __getitem__(self, idx):
-        stem = self.names[idx]
-        cls = stem.split('_', 1)[0]
-        file = self.root / cls / f"{stem}.txt"
-
-        pc = _load_point_cloud(file, self.num_points)     # (n,3)
-        if self.transform is not None:
-            pc = self.transform(pc)
-
-        label = self.cls2idx[cls]
-        return torch.from_numpy(pc), label
     
 
 
@@ -127,29 +120,29 @@ def visualize_classes(classes_to_viz: list):
         plot_point_cloud(pointcloud, title=class_to_viz, elev=20, azim=-60)
 
 
-visualize_classes(['bottle', 'chair', 'airplane', 'monitor'])
+# visualize_classes(['bottle', 'chair', 'airplane', 'monitor'])
 
 
-# ------------------------------------------------------------------
-train_ds = ModelNet40(
-    root_dir="modelnet40_normal_resampled",
-    split_txt="modelnet40_train.txt",
-    num_points=256
-)
-test_ds  = ModelNet40(
-    root_dir="modelnet40_normal_resampled",
-    split_txt="modelnet40_test.txt"
-)
+# # ------------------------------------------------------------------
+# train_ds = ModelNet40(
+#     root_dir="modelnet40_normal_resampled",
+#     split_txt="modelnet40_train.txt",
+#     num_points=256
+# )
+# test_ds  = ModelNet40(
+#     root_dir="modelnet40_normal_resampled",
+#     split_txt="modelnet40_test.txt"
+# )
 
-train_loader = torch.utils.data.DataLoader(
-    train_ds, batch_size=32, shuffle=True, drop_last=True
-)
+# train_loader = torch.utils.data.DataLoader(
+#     train_ds, batch_size=32, shuffle=True, drop_last=True
+# )
 
-print("Train Obj Shape: ", train_ds[0][0].shape)
-print("Train Len: ", len(train_ds))
+# print("Train Obj Shape: ", train_ds[0][0].shape)
+# print("Train Len: ", len(train_ds))
 
-print("Test Obj Shape: ", test_ds[0][0].shape)
-print("Test Len: ", len(test_ds))
+# print("Test Obj Shape: ", test_ds[0][0].shape)
+# print("Test Len: ", len(test_ds))
 
 
 
