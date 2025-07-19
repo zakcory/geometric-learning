@@ -62,9 +62,9 @@ class SymmetrizationMLP(nn.Module):
     def __init__(
         self,
         num_points=256,
-        sampled_points=15,     # number of subsampled points
+        sampled_points=8,     # number of subsampled points
         n_classes=40,
-        hidden_dims=(64, 32),
+        hidden_dims=(256, 128),
     ):
         
         super().__init__()
@@ -99,40 +99,31 @@ class SymmetrizationMLP(nn.Module):
         device = x.device
         G = self.group_size    
         K = self.K
+        out = []
 
-        # subsample K points from each cloud in the batch
-        idx = torch.stack([torch.randperm(N, device=device)[:K] for _ in range(B)])
-        pts    = torch.gather(
-                    x, 1, idx.unsqueeze(-1).expand(-1, -1, 3)
-                )                                             # (B,K,3)
+        perms = self.perms.to(device)         # (G,K)
 
-        # permute each cloud in all possible ways
-        perms = self.perms.to(device)                        # (G,K)
+        for b in range(B):                    # loop over clouds
+            pts  = x[b, torch.randperm(N, device=device)[:K]]   # (K,3)
+            perm = pts[perms]                                    # (G,K,3)
+            flat = perm.reshape(G, -1)                           # (G,K*3)
+            y    = self.mlp(flat).mean(dim=0)                    # (n_classes,)
+            out.append(y)
 
-        pts_exp = pts.unsqueeze(1).expand(B, G, K, 3)       # (B,G,K,3)
-        perms_exp = perms.unsqueeze(0).unsqueeze(-1)          # (1,G,K,1)
-        perms_exp = perms_exp.expand(B, G, K, 3)              # (B,G,K,3)
-
-        permuted = torch.gather(pts_exp, 2, perms_exp)       # (B,G,K,3)
-
-        # pass through MLP and pool (mean) over the group
-        flat = permuted.reshape(B * G, K * 3)                 # (B·G, K*3)
-        y = self.mlp(flat).view(B, G, -1)                  # (B,G,n_classes)
-
-        return y.mean(dim=1)                                  # (B,n_classes)
+        return torch.stack(out, dim=0)                           # (B,n_classes)
 
 
 class SampledSymmetrizationMLP(nn.Module):
     """
-    
+    Subsample 5% of the group elements (row permutations) and average the output of the MLP over the sampled permutations
     """
 
     def __init__(
         self,
         num_points=256,
-        sampled_pts=256, 
+        sampled_pts=8, 
         n_classes=40,      
-        hidden_dims=(128, 64)
+        hidden_dims=(256, 128)
     ):
         super().__init__()
         self.N = num_points
@@ -140,7 +131,7 @@ class SampledSymmetrizationMLP(nn.Module):
 
         # num of permuations to sample
         full_size = math.factorial(self.K)
-        self.P = math.ceil(0.05 * full_size)
+        self.P = (full_size * 5 + 99) // 100
         assert self.P >= 1, "need at least one permutation sample"
 
         # vanilla MLP
@@ -182,13 +173,103 @@ class SampledSymmetrizationMLP(nn.Module):
         ).view(B, self.P, self.K)           # (P,K)
 
         # create (B,P,K,3) tensor of permuted copies
-        pts_exp  = pts[:, None].expand(B, self.P, self.K, 3)
-        perms_exp = perms[None, :, :, None].expand_as(pts_exp)
+        pts_exp   = pts.unsqueeze(1).expand(-1, self.P, -1, 3)      # (B, P, K, 3)
+        perms_exp = perms.unsqueeze(-1).expand_as(pts_exp)          # (B, P, K, 3)
         pts_perm = torch.gather(pts_exp, 2, perms_exp)      # (B,P,K,3)
 
         # flatten  and pass through MLP
         flat = pts_perm.reshape(B * self.P, -1)             # (B·P, K*3)
-        y = self.mlp(flat).view(B, self.P, 1)               # (B,P,n_classes)
+        y = self.mlp(flat).view(B, self.P, -1)               # (B,P,n_classes)
 
         # average over sampled permutations 
         return y.mean(dim=1)                                # (B,n_classes)
+
+
+class EqvLayer(nn.Module):
+    """
+    Equivariant layer
+    """
+
+    def __init__(self, d_in, d_out, bias=True):
+        super().__init__()
+        self.W_self = nn.Linear(d_in, d_out, bias=bias)
+        self.W_agg  = nn.Linear(d_in, d_out, bias=False)
+
+    def forward(self, x):
+        """
+        x : (B, N, d_in)
+        return : (B, N, d_out)
+        """
+        mean = x.mean(dim=1, keepdim=True)         
+        y = self.W_self(x) + self.W_agg(mean)         
+        return y
+
+
+class EquivariantLinearMLP(nn.Module):
+    """
+    Linear equivariant layers + point-wise non-linearities + invariant layer
+    """
+
+    def __init__(
+        self,
+        d_in=3,
+        hidden_dims=(256, 128),  
+        n_classes=40,
+    ):
+        super().__init__()
+        layers = []
+        prev = d_in
+        for h in hidden_dims:
+            layers += [EqvLayer(prev, h), nn.ReLU(inplace=True)]
+            prev = h
+        self.phi = nn.Sequential(*layers)              # equivariant
+        self.head = nn.Linear(prev, n_classes)         # invariant 
+
+    def forward(self, x):
+        """
+        x : (B, N, 3)
+        """
+        x = self.phi(x)                # equivariant (B,N,H)
+        x = x.mean(dim=1)              # invariant  (B,H)
+        return self.head(x)            # logits (B,n_classes)
+
+
+class DataAugmentationMLP(nn.Module):
+    """
+    Standard MLP + permutation data augmentation
+    """
+
+    def __init__(
+        self,
+        num_points: int = 256,
+        n_classes: int = 40,
+        hidden_dims=(256, 128),
+    ):
+        super().__init__()
+        self.num_points = num_points
+
+        layers, prev = [], num_points * 3
+        for h in hidden_dims:
+            layers += [nn.Linear(prev, h), nn.ReLU(inplace=True)]
+            prev = h
+        layers.append(nn.Linear(prev, n_classes))
+        self.mlp = nn.Sequential(*layers)
+
+    @staticmethod
+    def _random_permute(x: torch.Tensor) -> torch.Tensor:
+        """
+        x : (B, N, 3)  randomly permuted rows, independently per sample.
+        """
+        B, N, _ = x.shape
+        idx = torch.stack([torch.randperm(N, device=x.device) for _ in range(B)])
+        return torch.gather(x, 1, idx.unsqueeze(-1).expand(-1, -1, 3))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        x : (B, N, 3)
+        """
+        if self.training:
+            x = self._random_permute(x)      # data augmentation only in train
+
+        x = x.reshape(x.size(0), -1)         # flatten 
+        return self.mlp(x)                   # logits (B, n_classes)
